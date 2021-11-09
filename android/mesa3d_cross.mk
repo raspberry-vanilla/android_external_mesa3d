@@ -46,6 +46,9 @@ LOCAL_MODULE := meson.dummy.$(LOCAL_MULTILIB)
 include $(BUILD_SHARED_LIBRARY)
 
 LOCAL_PATH := $(MY_PATH)
+MESA3D_TOP := $(dir $(LOCAL_PATH))
+
+MESA_GIT_SHA1 := $(shell git -C $(MESA3D_TOP) rev-parse HEAD 2>/dev/null)
 
 link_deps := \
 	$(built_static_libraries) \
@@ -95,7 +98,7 @@ MESON_GEN_NINJA := \
 	-Degl=enabled                                                                \
 	-Dcpp_rtti=false                                                             \
 
-MESON_BUILD := PATH=/usr/bin:/bin:/sbin:$$PATH ninja -C $(MESON_OUT_DIR)/build
+MESON_BUILD := MESA_GIT_SHA1_OVERRIDE=$(MESA_GIT_SHA1) PATH=/usr/bin:/bin:/sbin:$$PATH ninja -C $(MESON_OUT_DIR)/build
 
 $(MESON_GEN_FILES_TARGET): MESON_CPU_FAMILY := $(subst arm64,aarch64,$(TARGET_$(M_TARGET_PREFIX)ARCH))
 
