@@ -62,6 +62,11 @@
 #define VG(x) ((void)0)
 #endif
 
+#ifdef ANDROID
+#include <vndk/hardware_buffer.h>
+#include "util/android/buffer_info.h"
+#endif
+
 #include "v3dv_limits.h"
 
 #include "common/v3d_device_info.h"
@@ -526,12 +531,7 @@ struct v3dv_device {
    struct util_dynarray device_address_bo_list; /* Array of struct v3dv_bo * */
 
 #ifdef ANDROID
-   const void *gralloc;
-   enum {
-      V3DV_GRALLOC_UNKNOWN,
-      V3DV_GRALLOC_CROS,
-      V3DV_GRALLOC_OTHER,
-   } gralloc_type;
+   struct gralloc gralloc;
 #endif
 };
 
@@ -542,6 +542,10 @@ struct v3dv_device_memory {
    const VkMemoryType *type;
    bool is_for_wsi;
    bool is_for_device_address;
+
+#ifdef ANDROID
+   struct AHardwareBuffer *android_hardware_buffer;
+#endif
 };
 
 #define V3D_OUTPUT_IMAGE_FORMAT_NO 255
@@ -2481,20 +2485,41 @@ u64_compare(const void *key1, const void *key2)
 #  undef v3dX
 #endif
 
+VkResult
+v3dv_device_import_bo(struct v3dv_device *device,
+                      int fd, uint64_t size,
+                      struct v3dv_bo **bo);
+
+void
+v3d_setup_slices(struct v3dv_image *image);
+
 #ifdef ANDROID
 VkResult
-v3dv_gralloc_info(struct v3dv_device *device,
-                  const VkNativeBufferANDROID *gralloc_info,
-                  int *out_dmabuf,
-                  int *out_stride,
-                  int *out_size,
-                  uint64_t *out_modifier);
+v3dv_android_populate_image_layout(struct v3dv_device *device,
+                                   struct v3dv_image *image,
+                                   struct android_handle *handle);
 
 VkResult
 v3dv_import_native_buffer_fd(VkDevice device_h,
                              int dma_buf,
                              const VkAllocationCallbacks *alloc,
                              VkImage image_h);
+
+uint64_t
+v3dv_ahb_usage_from_vk_usage(const VkImageCreateFlags vk_create,
+                             const VkImageUsageFlags vk_usage);
+
+VkResult
+v3dv_import_ahb_memory(struct v3dv_device *device,
+                       struct v3dv_device_memory *mem,
+                       const VkImportAndroidHardwareBufferInfoANDROID *info,
+                       VkImage image_h);
+
+VkResult
+v3dv_create_ahb_memory(struct v3dv_device *device,
+                       struct v3dv_device_memory *mem,
+                       const VkMemoryAllocateInfo *pAllocateInfo,
+                       VkImage image_h);
 #endif /* ANDROID */
 
 #endif /* V3DV_PRIVATE_H */

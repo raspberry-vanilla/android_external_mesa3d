@@ -178,7 +178,9 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_provoking_vertex                = true,
       .EXT_separate_stencil_usage          = true,
       .EXT_vertex_attribute_divisor        = true,
+      .EXT_queue_family_foreign            = true,
 #ifdef ANDROID
+      .ANDROID_external_memory_android_hardware_buffer = true,
       .ANDROID_native_buffer               = true,
 #endif
    };
@@ -1690,6 +1692,21 @@ v3dv_GetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
          props->allowCommandBufferQueryCopies = true;
          break;
       }
+#ifdef ANDROID
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wswitch"
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENTATION_PROPERTIES_ANDROID: {
+         uint64_t front_rendering_usage = 0;
+         VkPhysicalDevicePresentationPropertiesANDROID *props =
+            (VkPhysicalDevicePresentationPropertiesANDROID *)ext;
+
+         gralloc_get_front_rendering_usage(NULL, &front_rendering_usage);
+         props->sharedImage = front_rendering_usage ? VK_TRUE
+                                                    : VK_FALSE;
+         break;
+      }
+#pragma GCC diagnostic pop
+#endif
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT: {
          VkPhysicalDeviceDrmPropertiesEXT *props =
             (VkPhysicalDeviceDrmPropertiesEXT *)ext;
@@ -1962,6 +1979,14 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
       return vk_error(NULL, result);
    }
 
+#ifdef ANDROID
+   if (probe_gralloc(&device->gralloc)) {
+      result = VK_ERROR_INITIALIZATION_FAILED;
+      vk_free(&device->vk.alloc, device);
+      return vk_error("Failed to probe gralloc", result);
+   }
+#endif
+
    device->instance = instance;
    device->pdevice = physical_device;
 
@@ -2018,6 +2043,9 @@ fail:
    cnd_destroy(&device->query_ended);
    mtx_destroy(&device->query_mutex);
    vk_device_finish(&device->vk);
+#ifdef ANDROID
+   destroy_gralloc(&device->gralloc);
+#endif
    vk_free(&device->vk.alloc, device);
 
    return result;
@@ -2050,6 +2078,9 @@ v3dv_DestroyDevice(VkDevice _device,
    mtx_destroy(&device->query_mutex);
 
    vk_device_finish(&device->vk);
+#ifdef ANDROID
+   destroy_gralloc(&device->gralloc);
+#endif
    vk_free2(&device->vk.alloc, pAllocator, device);
 }
 
@@ -2095,6 +2126,11 @@ device_free(struct v3dv_device *device, struct v3dv_device_memory *mem)
    }
 
    v3dv_bo_free(device, mem->bo);
+
+#ifdef ANDROID
+   if (mem->android_hardware_buffer)
+      AHardwareBuffer_release(mem->android_hardware_buffer);
+#endif
 }
 
 static void
@@ -2133,11 +2169,10 @@ device_map(struct v3dv_device *device, struct v3dv_device_memory *mem)
    return VK_SUCCESS;
 }
 
-static VkResult
-device_import_bo(struct v3dv_device *device,
-                 const VkAllocationCallbacks *pAllocator,
-                 int fd, uint64_t size,
-                 struct v3dv_bo **bo)
+VkResult
+v3dv_device_import_bo(struct v3dv_device *device,
+                      int fd, uint64_t size,
+                      struct v3dv_bo **bo)
 {
    *bo = NULL;
 
@@ -2223,7 +2258,7 @@ device_alloc_for_wsi(struct v3dv_device *device,
    if (err < 0)
       goto fail_export;
 
-   result = device_import_bo(device, pAllocator, fd, size, &mem->bo);
+   result = v3dv_device_import_bo(device, fd, size, &mem->bo);
    close(fd);
    if (result != VK_SUCCESS)
       goto fail_import;
@@ -2313,7 +2348,51 @@ v3dv_AllocateMemory(VkDevice _device,
       }
    }
 
+   const VkExportMemoryAllocateInfo *export_info =
+      vk_find_struct_const(pAllocateInfo->pNext, EXPORT_MEMORY_ALLOCATE_INFO);
+   const struct VkImportAndroidHardwareBufferInfoANDROID *ahb_import_info =
+      vk_find_struct_const(pAllocateInfo->pNext, IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID);
+   const VkMemoryDedicatedAllocateInfo *dedicate_info =
+      vk_find_struct_const(pAllocateInfo->pNext, MEMORY_DEDICATED_ALLOCATE_INFO);
+
    VkResult result = VK_SUCCESS;
+
+   /* Block copied from RADV as is */
+   if (pAllocateInfo->allocationSize == 0 && !ahb_import_info &&
+       !(export_info && (export_info->handleTypes &
+                         VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID))) {
+      /* Apparently, this is allowed */
+      *pMem = VK_NULL_HANDLE;
+      return VK_SUCCESS;
+   }
+
+   /* Check if we need to support Android HW buffer export. If so,
+    * create AHardwareBuffer and import memory from it.
+    */
+   bool android_export = false;
+   if (export_info && export_info->handleTypes &
+       VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID)
+      android_export = true;
+
+   if (ahb_import_info) {
+#ifdef ANDROID
+      result = v3dv_import_ahb_memory(device, mem, ahb_import_info,
+                                      dedicate_info ? dedicate_info->image : 0);
+#else
+      result = VK_ERROR_FEATURE_NOT_PRESENT;
+#endif
+      goto done;
+   }
+
+   if (android_export) {
+#ifdef ANDROID
+      result = v3dv_create_ahb_memory(device, mem, pAllocateInfo,
+                                      dedicate_info ? dedicate_info->image : 0);
+#else
+      result = VK_ERROR_FEATURE_NOT_PRESENT;
+#endif
+      goto done;
+   }
 
    /* We always allocate device memory in multiples of a page, so round up
     * requested size to that.
@@ -2328,8 +2407,7 @@ v3dv_AllocateMemory(VkDevice _device,
       } else if (fd_info && fd_info->handleType) {
          assert(fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
                 fd_info->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
-         result = device_import_bo(device, pAllocator,
-                                   fd_info->fd, alloc_size, &mem->bo);
+         result = v3dv_device_import_bo(device, fd_info->fd, alloc_size, &mem->bo);
          if (result == VK_SUCCESS)
             close(fd_info->fd);
       } else {
@@ -2337,6 +2415,7 @@ v3dv_AllocateMemory(VkDevice _device,
       }
    }
 
+done:
    if (result != VK_SUCCESS) {
       vk_object_free(&device->vk, pAllocator, mem);
       return vk_error(device, result);
