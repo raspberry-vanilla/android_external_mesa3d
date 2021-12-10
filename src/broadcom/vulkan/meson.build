@@ -72,6 +72,7 @@ files_per_version = files(
 v3d_versions = ['42']
 
 v3dv_flags = []
+v3dv_flags_cpp = []
 
 dep_v3dv3 = dependency('v3dv3', required : false)
 if dep_v3dv3.found()
@@ -100,7 +101,7 @@ if with_platform_wayland
 endif
 
 if with_platform_android
-  v3dv_deps += dep_android
+  v3dv_deps += [dep_android, idep_android_buffer]
   v3dv_flags += '-DVK_USE_PLATFORM_ANDROID_KHR'
   libv3dv_files += files('v3dv_android.c')
 endif
@@ -133,6 +134,7 @@ libvulkan_broadcom = shared_library(
   ],
   dependencies : v3dv_deps,
   c_args : v3dv_flags,
+  cpp_args : v3dv_flags_cpp,
   link_args : ['-Wl,--build-id=sha1', ld_args_bsymbolic, ld_args_gc_sections],
   gnu_symbol_visibility : 'hidden',
   install : true,

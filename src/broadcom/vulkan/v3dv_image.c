@@ -29,6 +29,8 @@
 #include "vk_util.h"
 #include "vulkan/wsi/wsi_common.h"
 
+#include "util/log.h"
+
 /**
  * Computes the HW's UIFblock padding for a given height/cpp.
  *
@@ -239,7 +241,7 @@ v3d_setup_plane_slices(struct v3dv_image *image, uint8_t plane,
    }
 }
 
-static void
+void
 v3d_setup_slices(struct v3dv_image *image, bool disjoint)
 {
    if (disjoint && image->plane_count == 1)
@@ -316,25 +318,8 @@ v3dv_image_init(struct v3dv_device *device,
       tiling = VK_IMAGE_TILING_LINEAR;
    }
 
-#ifdef ANDROID
-   const VkNativeBufferANDROID *native_buffer =
-      vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
-
-   int native_buf_fd = -1;
-   int native_buf_stride = 0;
-   int native_buf_size = 0;
-
-   if (native_buffer != NULL) {
-      VkResult result = v3dv_gralloc_info(device, native_buffer, &native_buf_fd,
-                                          &native_buf_stride, &native_buf_size,
-                                          &modifier);
-      if (result != VK_SUCCESS)
-         return result;
-
-      if (modifier != DRM_FORMAT_MOD_BROADCOM_UIF)
-         tiling = VK_IMAGE_TILING_LINEAR;
-   }
-#endif
+   const VkExternalMemoryImageCreateInfo *external_info =
+      vk_find_struct_const(pCreateInfo->pNext, EXTERNAL_MEMORY_IMAGE_CREATE_INFO);
 
    const struct v3dv_format *format =
       v3dv_X(device, get_format)(pCreateInfo->format);
@@ -382,23 +367,44 @@ v3dv_image_init(struct v3dv_device *device,
    bool disjoint = image->vk.create_flags & VK_IMAGE_CREATE_DISJOINT_BIT;
    v3d_setup_slices(image, disjoint);
 
-#ifdef ANDROID
-   if (native_buffer != NULL) {
-      assert(image->plane_count == 1);
-      image->planes[0].slices[0].stride = native_buf_stride;
-      image->non_disjoint_size =
-         image->planes[0].slices[0].size =
-         image->planes[0].size = native_buf_size;
+   VkResult result = VK_SUCCESS;
 
-      VkResult result = v3dv_import_native_buffer_fd(v3dv_device_to_handle(device),
-                                                     native_buf_fd, pAllocator,
-                                                     v3dv_image_to_handle(image));
+#ifdef ANDROID
+   bool a_hardware_buffer =
+      external_info && (external_info->handleTypes &
+                        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID);
+
+   if (a_hardware_buffer) {
+      assert(!(image->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT));
+   }
+
+   const VkNativeBufferANDROID *native_buffer =
+      vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
+
+   if (!a_hardware_buffer && native_buffer != NULL) {
+      struct android_handle android_handle = {
+         .handle = native_buffer->handle,
+         .hal_format = native_buffer->format,
+         .pixel_stride = native_buffer->stride,
+      };
+
+      result = v3dv_android_populate_image_layout(device, image, &android_handle);
       if (result != VK_SUCCESS)
-         return result;
+         goto fail;
+
+      result = v3dv_import_native_buffer_fd(v3dv_device_to_handle(device),
+                                            native_buffer->handle->data[0], pAllocator,
+                                            v3dv_image_to_handle(image));
+      if (result != VK_SUCCESS)
+         goto fail;
    }
 #endif
 
    return VK_SUCCESS;
+
+fail:
+   vk_object_free(&device->vk, pAllocator, image);
+   return result;
 }
 
 static VkResult
@@ -477,6 +483,8 @@ v3dv_CreateImage(VkDevice _device,
                  const VkAllocationCallbacks *pAllocator,
                  VkImage *pImage)
 {
+   mesa_logi("%s: Enter", __func__);
+
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
 
 #ifdef ANDROID
