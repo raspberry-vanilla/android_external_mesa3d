@@ -359,7 +359,7 @@ v3dv_meta_can_use_tlb(struct v3dv_image *image,
    if (offset->x != 0 || offset->y != 0)
       return false;
 
-   if (image->format->rt_type != V3D_OUTPUT_IMAGE_FORMAT_NO) {
+   if (image->format->planes[0].rt_type != V3D_OUTPUT_IMAGE_FORMAT_NO) {
       if (compat_format)
          *compat_format = image->vk.format;
       return true;
@@ -473,7 +473,7 @@ copy_image_to_buffer_blit(struct v3dv_cmd_buffer *cmd_buffer,
     * source image. The exception is the case where we are copying
     * stencil (8bpp) to a combined d24s8 image (32bpp).
     */
-   uint32_t buffer_bpp = image->cpp;
+   uint32_t buffer_bpp = image->planes[0].cpp;
 
    VkImageAspectFlags copy_aspect = region->imageSubresource.aspectMask;
 
@@ -643,8 +643,8 @@ copy_image_to_buffer_blit(struct v3dv_cmd_buffer *cmd_buffer,
 
       result =
          vk_common_BindImageMemory(_device, uiview,
-                                   v3dv_device_memory_to_handle(image->mem),
-                                   image->mem_offset);
+                                   v3dv_device_memory_to_handle(image->planes[0].mem),
+                                   image->planes[0].mem_offset);
       if (result != VK_SUCCESS)
          return handled;
 
@@ -751,6 +751,17 @@ copy_image_to_buffer_blit(struct v3dv_cmd_buffer *cmd_buffer,
    return true;
 }
 
+
+static void
+init_image_aliases(struct v3dv_cmd_buffer *cmd_buffer,
+                   struct v3dv_image **aliases,
+                   struct v3dv_image *src);
+
+static void
+cleanup_image_aliases(struct v3dv_cmd_buffer *cmd_buffer,
+                      struct v3dv_image **aliases,
+                      struct v3dv_image *src);
+
 VKAPI_ATTR void VKAPI_CALL
 v3dv_CmdCopyImageToBuffer2KHR(VkCommandBuffer commandBuffer,
                               const VkCopyImageToBufferInfo2 *info)
@@ -764,13 +775,29 @@ v3dv_CmdCopyImageToBuffer2KHR(VkCommandBuffer commandBuffer,
 
    cmd_buffer->state.is_transfer = true;
 
+   struct v3dv_image *aliases[V3DV_MAX_PLANE_COUNT] = {};
+
+   init_image_aliases(cmd_buffer, aliases, image);
+
    for (uint32_t i = 0; i < info->regionCount; i++) {
-      if (copy_image_to_buffer_tlb(cmd_buffer, buffer, image, &info->pRegions[i]))
+      uint8_t plane =
+         v3dv_plane_from_aspect(info->pRegions[i].imageSubresource.aspectMask);
+
+      struct v3dv_image *alias = aliases[plane];
+      assert(alias);
+
+      VkBufferImageCopy2 region = info->pRegions[i];
+      if (image->plane_count > 1)
+         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+      if (copy_image_to_buffer_tlb(cmd_buffer, buffer, alias, &region))
          continue;
-      if (copy_image_to_buffer_blit(cmd_buffer, buffer, image, &info->pRegions[i]))
+      if (copy_image_to_buffer_blit(cmd_buffer, buffer, alias, &region))
          continue;
       unreachable("Unsupported image to buffer copy.");
    }
+
+   cleanup_image_aliases(cmd_buffer, aliases, image);
 
    cmd_buffer->state.is_transfer = false;
 }
@@ -859,10 +886,10 @@ copy_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
     * the underlying pixel data according to its format, we can always choose
     * to use compatible formats that are supported with the TFU unit.
     */
-   assert(dst->cpp == src->cpp);
+   assert(dst->planes[0].cpp == src->planes[0].cpp);
    const struct v3dv_format *format =
       v3dv_get_compatible_tfu_format(cmd_buffer->device,
-                                     dst->cpp, NULL);
+                                     dst->planes[0].cpp, NULL);
 
    /* Emit a TFU job for each layer to blit */
    const uint32_t layer_count = dst->vk.image_type != VK_IMAGE_TYPE_3D ?
@@ -876,29 +903,29 @@ copy_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
       region->dstSubresource.baseArrayLayer : region->dstOffset.z;
    for (uint32_t i = 0; i < layer_count; i++) {
       const uint32_t dst_offset =
-         dst->mem->bo->offset +
-         v3dv_layer_offset(dst, dst_mip_level, base_dst_layer + i);
+         dst->planes[0].mem->bo->offset +
+         v3dv_layer_offset(dst, dst_mip_level, base_dst_layer + i, 0);
       const uint32_t src_offset =
-         src->mem->bo->offset +
-         v3dv_layer_offset(src, src_mip_level, base_src_layer + i);
+         src->planes[0].mem->bo->offset +
+         v3dv_layer_offset(src, src_mip_level, base_src_layer + i, 0);
 
-      const struct v3d_resource_slice *dst_slice = &dst->slices[dst_mip_level];
-      const struct v3d_resource_slice *src_slice = &src->slices[src_mip_level];
+      const struct v3d_resource_slice *dst_slice = &dst->planes[0].slices[dst_mip_level];
+      const struct v3d_resource_slice *src_slice = &src->planes[0].slices[src_mip_level];
 
       v3dv_X(cmd_buffer->device, meta_emit_tfu_job)(
          cmd_buffer,
-         dst->mem->bo->handle,
+         dst->planes[0].mem->bo->handle,
          dst_offset,
          dst_slice->tiling,
          dst_slice->padded_height,
-         dst->cpp,
-         src->mem->bo->handle,
+         dst->planes[0].cpp,
+         src->planes[0].mem->bo->handle,
          src_offset,
          src_slice->tiling,
          src_slice->tiling == V3D_TILING_RASTER ?
                               src_slice->stride : src_slice->padded_height,
-         src->cpp,
-         width, height, format);
+         src->planes[0].cpp,
+         width, height, &format->planes[0]);
    }
 
    return true;
@@ -1025,9 +1052,79 @@ create_image_alias(struct v3dv_cmd_buffer *cmd_buffer,
     }
 
     struct v3dv_image *image = v3dv_image_from_handle(_image);
-    image->mem = src->mem;
-    image->mem_offset = src->mem_offset;
+    image->planes[0].mem = src->planes[0].mem;
+    image->planes[0].mem_offset = src->planes[0].mem_offset;
     return image;
+}
+
+static struct v3dv_image *
+create_single_plane_alias(struct v3dv_cmd_buffer *cmd_buffer,
+                          struct v3dv_image *src,
+                          uint8_t plane)
+{
+   assert(src->plane_count > 1);
+
+   VkDevice _device = v3dv_device_to_handle(cmd_buffer->device);
+
+   VkImageCreateInfo info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+      .imageType = src->vk.image_type,
+      .format = vk_format_get_plane_format(src->vk.format, plane),
+      .extent = {
+         .width = src->vk.extent.width,
+         .height = src->vk.extent.height,
+         .depth = src->vk.extent.depth
+      },
+      .mipLevels = src->vk.mip_levels,
+      .arrayLayers = src->vk.array_layers,
+      .samples = src->vk.samples,
+      .tiling = src->vk.tiling,
+      .usage = src->vk.usage
+   };
+
+   VkImage _image;
+   VkResult result =
+      v3dv_CreateImage(_device, &info, &cmd_buffer->device->vk.alloc, &_image);
+   if (result != VK_SUCCESS) {
+      v3dv_flag_oom(cmd_buffer, NULL);
+      return NULL;
+   }
+
+   struct v3dv_image *image = v3dv_image_from_handle(_image);
+   memcpy(&image->planes[0], &src->planes[plane],
+          sizeof(image->planes[0]));
+
+   return image;
+}
+
+static void
+init_image_aliases(struct v3dv_cmd_buffer *cmd_buffer,
+                   struct v3dv_image **aliases,
+                   struct v3dv_image *src)
+{
+   if (src->plane_count == 1) {
+      aliases[0] = src;
+   } else {
+      for (uint8_t i = 0; i < src->plane_count; i++)
+         aliases[i] = create_single_plane_alias(cmd_buffer, src, i);
+   }
+}
+
+static void
+cleanup_image_aliases(struct v3dv_cmd_buffer *cmd_buffer,
+                      struct v3dv_image **aliases,
+                      struct v3dv_image *src)
+{
+   if (src->plane_count == 1) {
+      return;
+   } else {
+      VkDevice _device = v3dv_device_to_handle(cmd_buffer->device);
+
+      for (uint8_t i = 0; i < src->plane_count; i++)
+         v3dv_DestroyImage(_device,
+                           v3dv_image_to_handle(aliases[i]),
+                           &cmd_buffer->device->vk.alloc);
+   }
 }
 
 /**
@@ -1079,10 +1176,10 @@ copy_image_blit(struct v3dv_cmd_buffer *cmd_buffer,
        * divisors for the width and height depending on the source image's
        * bpp.
        */
-      assert(src->cpp == dst->cpp);
+      assert(src->planes[0].cpp == dst->planes[0].cpp);
 
       format = VK_FORMAT_R32G32_UINT;
-      switch (src->cpp) {
+      switch (src->planes[0].cpp) {
       case 16:
          format = VK_FORMAT_R32G32B32A32_UINT;
          break;
@@ -1107,13 +1204,13 @@ copy_image_blit(struct v3dv_cmd_buffer *cmd_buffer,
       dst = create_image_alias(cmd_buffer, dst,
                                dst_scale_w, dst_scale_h, format);
    } else {
-      format = src->format->rt_type != V3D_OUTPUT_IMAGE_FORMAT_NO ?
+      format = src->format->planes[0].rt_type != V3D_OUTPUT_IMAGE_FORMAT_NO ?
          src->vk.format : get_compatible_tlb_format(src->vk.format);
       if (format == VK_FORMAT_UNDEFINED)
          return false;
 
       const struct v3dv_format *f = v3dv_X(cmd_buffer->device, get_format)(format);
-      if (!f->supported || f->tex_type == TEXTURE_DATA_FORMAT_NO)
+      if (!f->plane_count || f->planes[0].tex_type == TEXTURE_DATA_FORMAT_NO)
          return false;
    }
 
@@ -1202,17 +1299,17 @@ copy_image_linear_buffer(struct v3dv_cmd_buffer *cmd_buffer,
    assert(region->dstSubresource.layerCount == 1);
 
    /* Copy each row at a time using a buffer copy */
-   assert(src->cpp == dst->cpp);
-   const uint32_t bpp = src->cpp;
+   assert(src->planes[0].cpp == dst->planes[0].cpp);
+   const uint32_t bpp = src->planes[0].cpp;
 
-   const uint32_t src_stride = src->slices[0].stride;
+   const uint32_t src_stride = src->planes[0].slices[0].stride;
    const VkDeviceSize src_offset =
-      v3dv_layer_offset(src, 0, 0) +
+      v3dv_layer_offset(src, 0, 0, 0) +
       region->srcOffset.y * src_stride + region->srcOffset.x * bpp;
 
-   const uint32_t dst_stride = dst->slices[0].stride;
+   const uint32_t dst_stride = dst->planes[0].slices[0].stride;
    const VkDeviceSize dst_offset =
-      v3dv_layer_offset(dst, 0, 0) +
+      v3dv_layer_offset(dst, 0, 0, 0) +
       region->dstOffset.y * dst_stride + region->dstOffset.x * bpp;
 
    const VkDeviceSize row_size = region->extent.width * bpp;
@@ -1227,8 +1324,8 @@ copy_image_linear_buffer(struct v3dv_cmd_buffer *cmd_buffer,
 
       v3dv_X(cmd_buffer->device, meta_copy_buffer)
          (cmd_buffer,
-          dst->mem->bo, dst->mem_offset,
-          src->mem->bo, src->mem_offset,
+          dst->planes[0].mem->bo, dst->planes[0].mem_offset,
+          src->planes[0].mem->bo, src->planes[0].mem_offset,
           &buffer_region);
    }
    return true;
@@ -1253,8 +1350,8 @@ copy_image_linear_texel_buffer(struct v3dv_cmd_buffer *cmd_buffer,
    assert(region->dstSubresource.baseArrayLayer == 0);
    assert(region->dstSubresource.layerCount == 1);
 
-   const uint32_t bpp = src->cpp;
-   assert(src->cpp == dst->cpp);
+   assert(src->planes[0].cpp == dst->planes[0].cpp);
+   const uint32_t bpp = src->planes[0].cpp;
 
    VkFormat format;
    switch (bpp) {
@@ -1285,9 +1382,8 @@ copy_image_linear_texel_buffer(struct v3dv_cmd_buffer *cmd_buffer,
       .a = VK_COMPONENT_SWIZZLE_IDENTITY,
    };
 
-   const uint32_t buf_stride = src->slices[0].stride;
+   const uint32_t buf_stride = src->planes[0].slices[0].stride;
    const VkDeviceSize buf_offset =
-      v3dv_layer_offset(src, 0, 0) +
       region->srcOffset.y * buf_stride + region->srcOffset.x * bpp;
 
    struct v3dv_buffer src_buffer;
@@ -1296,7 +1392,7 @@ copy_image_linear_texel_buffer(struct v3dv_cmd_buffer *cmd_buffer,
 
    const struct VkBufferCreateInfo buf_create_info = {
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = src->size,
+      .size = src->planes[0].size,
       .usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT,
       .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
    };
@@ -1305,8 +1401,9 @@ copy_image_linear_texel_buffer(struct v3dv_cmd_buffer *cmd_buffer,
    const VkBindBufferMemoryInfo buf_bind_info = {
       .sType = VK_STRUCTURE_TYPE_BIND_BUFFER_MEMORY_INFO,
       .buffer = v3dv_buffer_to_handle(&src_buffer),
-      .memory = v3dv_device_memory_to_handle(src->mem),
-      .memoryOffset = src->mem_offset,
+      .memory = v3dv_device_memory_to_handle(src->planes[0].mem),
+      .memoryOffset = src->planes[0].mem_offset +
+         v3dv_layer_offset(src, 0, 0, 0),
    };
    v3dv_buffer_bind_memory(&buf_bind_info);
 
@@ -1327,7 +1424,7 @@ copy_image_linear_texel_buffer(struct v3dv_cmd_buffer *cmd_buffer,
                                    format,
                                    format,
                                    &src_buffer,
-                                   src->cpp,
+                                   src->planes[0].cpp,
                                    0 /* color mask: full */, &ident_swizzle,
                                    1, &copy_region);
 }
@@ -1345,19 +1442,45 @@ v3dv_CmdCopyImage2KHR(VkCommandBuffer commandBuffer,
 
    cmd_buffer->state.is_transfer = true;
 
+   struct v3dv_image *src_aliases[V3DV_MAX_PLANE_COUNT] = {};
+   struct v3dv_image *dst_aliases[V3DV_MAX_PLANE_COUNT] = {};
+   init_image_aliases(cmd_buffer, src_aliases, src);
+   init_image_aliases(cmd_buffer, dst_aliases, dst);
+
    for (uint32_t i = 0; i < info->regionCount; i++) {
-      if (copy_image_tfu(cmd_buffer, dst, src, &info->pRegions[i]))
+      uint8_t src_plane =
+         v3dv_plane_from_aspect(info->pRegions[i].srcSubresource.aspectMask);
+      uint8_t dst_plane =
+         v3dv_plane_from_aspect(info->pRegions[i].dstSubresource.aspectMask);
+
+      /* need to modify the aspectMask to work with aliased images */
+      VkImageCopy2 region = info->pRegions[i];
+      if (src->plane_count > 1)
+         region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      if (dst->plane_count > 1)
+         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+      struct v3dv_image *src_alias = src_aliases[src_plane];
+      struct v3dv_image *dst_alias = dst_aliases[dst_plane];
+
+      assert(src_alias);
+      assert(dst_alias);
+
+      if (copy_image_tfu(cmd_buffer, dst_alias, src_alias, &region))
          continue;
-      if (copy_image_tlb(cmd_buffer, dst, src, &info->pRegions[i]))
+      if (copy_image_tlb(cmd_buffer, dst_alias, src_alias, &region))
          continue;
-      if (copy_image_blit(cmd_buffer, dst, src, &info->pRegions[i]))
+      if (copy_image_blit(cmd_buffer, dst_alias, src_alias, &region))
          continue;
-      if (copy_image_linear_texel_buffer(cmd_buffer, dst, src, &info->pRegions[i]))
+      if (copy_image_linear_texel_buffer(cmd_buffer, dst_alias, src_alias, &region))
          continue;
-      if (copy_image_linear_buffer(cmd_buffer, dst, src, &info->pRegions[i]))
+      if (copy_image_linear_buffer(cmd_buffer, dst_alias, src_alias, &region))
          continue;
       unreachable("Image copy not supported");
    }
+
+   cleanup_image_aliases(cmd_buffer, src_aliases, src);
+   cleanup_image_aliases(cmd_buffer, dst_aliases, dst);
 
    cmd_buffer->state.is_transfer = false;
 }
@@ -1516,7 +1639,8 @@ copy_buffer_to_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
    else
       height = region->bufferImageHeight;
 
-   if (width != image->vk.extent.width || height != image->vk.extent.height)
+   if (width != image->planes[0].width ||
+       height != image->planes[0].height)
       return false;
 
    /* Handle region semantics for compressed images */
@@ -1532,10 +1656,12 @@ copy_buffer_to_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
     */
    const struct v3dv_format *format =
       v3dv_get_compatible_tfu_format(cmd_buffer->device,
-                                     image->cpp, NULL);
+                                     image->planes[0].cpp, NULL);
+   /* TFU format is a single plane format as such we use plane 0 */
+   const struct v3dv_format_plane *format_plane = &format->planes[0];
 
    const uint32_t mip_level = region->imageSubresource.mipLevel;
-   const struct v3d_resource_slice *slice = &image->slices[mip_level];
+   const struct v3d_resource_slice *slice = &image->planes[0].slices[mip_level];
 
    uint32_t num_layers;
    if (image->vk.image_type != VK_IMAGE_TYPE_3D)
@@ -1544,14 +1670,14 @@ copy_buffer_to_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
       num_layers = region->imageExtent.depth;
    assert(num_layers > 0);
 
-   assert(image->mem && image->mem->bo);
-   const struct v3dv_bo *dst_bo = image->mem->bo;
+   assert(image->planes[0].mem && image->planes[0].mem->bo);
+   const struct v3dv_bo *dst_bo = image->planes[0].mem->bo;
 
    assert(buffer->mem && buffer->mem->bo);
    const struct v3dv_bo *src_bo = buffer->mem->bo;
 
    /* Emit a TFU job per layer to copy */
-   const uint32_t buffer_stride = width * image->cpp;
+   const uint32_t buffer_stride = width * image->planes[0].cpp;
    for (int i = 0; i < num_layers; i++) {
       uint32_t layer;
       if (image->vk.image_type != VK_IMAGE_TYPE_3D)
@@ -1565,7 +1691,7 @@ copy_buffer_to_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
       const uint32_t src_offset = src_bo->offset + buffer_offset;
 
       const uint32_t dst_offset =
-         dst_bo->offset + v3dv_layer_offset(image, mip_level, layer);
+         dst_bo->offset + v3dv_layer_offset(image, mip_level, layer, 0);
 
       v3dv_X(cmd_buffer->device, meta_emit_tfu_job)(
              cmd_buffer,
@@ -1573,13 +1699,13 @@ copy_buffer_to_image_tfu(struct v3dv_cmd_buffer *cmd_buffer,
              dst_offset,
              slice->tiling,
              slice->padded_height,
-             image->cpp,
+             image->planes[0].cpp,
              src_bo->handle,
              src_offset,
              V3D_TILING_RASTER,
              width,
              1,
-             width, height, format);
+             width, height, format_plane);
    }
 
    return true;
@@ -2286,8 +2412,8 @@ texel_buffer_shader_copy(struct v3dv_cmd_buffer *cmd_buffer,
     * For 3D images, this creates a layered framebuffer with a number of
     * layers matching the depth extent of the 3D image.
     */
-   uint32_t fb_width = u_minify(image->vk.extent.width, resource->mipLevel);
-   uint32_t fb_height = u_minify(image->vk.extent.height, resource->mipLevel);
+   uint32_t fb_width = u_minify(image->planes[0].width, resource->mipLevel);
+   uint32_t fb_height = u_minify(image->planes[0].height, resource->mipLevel);
    VkImageViewCreateInfo image_view_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = v3dv_image_to_handle(image),
@@ -2714,7 +2840,7 @@ copy_buffer_to_image_shader(struct v3dv_cmd_buffer *cmd_buffer,
     * destination image. The exception is the case where we are uploading
     * stencil (8bpp) to a combined d24s8 image (32bpp).
     */
-   uint32_t buf_bpp = image->cpp;
+   uint32_t buf_bpp = image->planes[0].cpp;
 
    /* We are about to upload the buffer data to an image so we can then
     * blit that to our destination region. Because we are going to implement
@@ -2853,7 +2979,7 @@ copy_buffer_to_image_cpu(struct v3dv_cmd_buffer *cmd_buffer,
    else
       buffer_height = region->bufferImageHeight;
 
-   uint32_t buffer_stride = buffer_width * image->cpp;
+   uint32_t buffer_stride = buffer_width * image->planes[0].cpp;
    uint32_t buffer_layer_stride = buffer_stride * buffer_height;
 
    uint32_t num_layers;
@@ -2900,17 +3026,26 @@ v3dv_CmdCopyBufferToImage2KHR(VkCommandBuffer commandBuffer,
 
    cmd_buffer->state.is_transfer = true;
 
+   struct v3dv_image *aliases[V3DV_MAX_PLANE_COUNT] = {};
+
+   init_image_aliases(cmd_buffer, aliases, image);
+
    uint32_t r = 0;
    while (r < info->regionCount) {
+      uint8_t plane =
+         v3dv_plane_from_aspect(info->pRegions[r].imageSubresource.aspectMask);
+
+      struct v3dv_image *alias = aliases[plane];
+
       /* The TFU and TLB paths can only copy one region at a time and the region
        * needs to start at the origin. We try these first for the common case
        * where we are copying full images, since they should be the fastest.
        */
       uint32_t batch_size = 1;
-      if (copy_buffer_to_image_tfu(cmd_buffer, image, buffer, &info->pRegions[r]))
+      if (copy_buffer_to_image_tfu(cmd_buffer, alias, buffer, &info->pRegions[r]))
          goto handled;
 
-      if (copy_buffer_to_image_tlb(cmd_buffer, image, buffer, &info->pRegions[r]))
+      if (copy_buffer_to_image_tlb(cmd_buffer, alias, buffer, &info->pRegions[r]))
          goto handled;
 
       /* Otherwise, we are copying subrects, so we fallback to copying
@@ -2937,7 +3072,7 @@ v3dv_CmdCopyBufferToImage2KHR(VkCommandBuffer commandBuffer,
          batch_size++;
       }
 
-      if (copy_buffer_to_image_shader(cmd_buffer, image, buffer,
+      if (copy_buffer_to_image_shader(cmd_buffer, alias, buffer,
                                       batch_size, &info->pRegions[r], true)) {
          goto handled;
       }
@@ -2948,13 +3083,12 @@ v3dv_CmdCopyBufferToImage2KHR(VkCommandBuffer commandBuffer,
        * slow it might not be worth it and we should instead put more effort
        * in handling more cases with the other paths.
        */
-      if (copy_buffer_to_image_cpu(cmd_buffer, image, buffer,
-                                   &info->pRegions[r])) {
+      if (copy_buffer_to_image_cpu(cmd_buffer, alias, buffer, &info->pRegions[r])) {
          batch_size = 1;
          goto handled;
       }
 
-      if (copy_buffer_to_image_shader(cmd_buffer, image, buffer,
+      if (copy_buffer_to_image_shader(cmd_buffer, alias, buffer,
                                       batch_size, &info->pRegions[r], false)) {
          goto handled;
       }
@@ -2964,6 +3098,8 @@ v3dv_CmdCopyBufferToImage2KHR(VkCommandBuffer commandBuffer,
 handled:
       r += batch_size;
    }
+
+   cleanup_image_aliases(cmd_buffer, aliases, image);
 
    cmd_buffer->state.is_transfer = false;
 }
@@ -3036,7 +3172,7 @@ blit_tfu(struct v3dv_cmd_buffer *cmd_buffer,
     */
    const struct v3dv_format *format =
       v3dv_get_compatible_tfu_format(cmd_buffer->device,
-                                     dst->cpp, NULL);
+                                     dst->planes[0].cpp, NULL);
 
    /* Emit a TFU job for each layer to blit */
    assert(region->dstSubresource.layerCount ==
@@ -3084,27 +3220,29 @@ blit_tfu(struct v3dv_cmd_buffer *cmd_buffer,
          src_mirror_z ? max_src_layer - i - 1: min_src_layer + i;
 
       const uint32_t dst_offset =
-         dst->mem->bo->offset + v3dv_layer_offset(dst, dst_mip_level, dst_layer);
+         dst->planes[0].mem->bo->offset + v3dv_layer_offset(dst, dst_mip_level,
+                                                            dst_layer, 0);
       const uint32_t src_offset =
-         src->mem->bo->offset + v3dv_layer_offset(src, src_mip_level, src_layer);
+         src->planes[0].mem->bo->offset + v3dv_layer_offset(src, src_mip_level,
+                                                            src_layer, 0);
 
-      const struct v3d_resource_slice *dst_slice = &dst->slices[dst_mip_level];
-      const struct v3d_resource_slice *src_slice = &src->slices[src_mip_level];
+      const struct v3d_resource_slice *dst_slice = &dst->planes[0].slices[dst_mip_level];
+      const struct v3d_resource_slice *src_slice = &src->planes[0].slices[src_mip_level];
 
       v3dv_X(cmd_buffer->device, meta_emit_tfu_job)(
          cmd_buffer,
-         dst->mem->bo->handle,
+         dst->planes[0].mem->bo->handle,
          dst_offset,
          dst_slice->tiling,
          dst_slice->padded_height,
-         dst->cpp,
-         src->mem->bo->handle,
+         dst->planes[0].cpp,
+         src->planes[0].mem->bo->handle,
          src_offset,
          src_slice->tiling,
          src_slice->tiling == V3D_TILING_RASTER ?
                               src_slice->stride : src_slice->padded_height,
-         src->cpp,
-         dst_width, dst_height, format);
+         src->planes[0].cpp,
+         dst_width, dst_height, &format->planes[0]);
    }
 
    return true;
@@ -4020,6 +4158,12 @@ blit_shader(struct v3dv_cmd_buffer *cmd_buffer,
       src_format = dst_format;
    }
 
+   /* We should have resolved multi-planar formats to a single format for the
+    * specified plane by now.
+    */
+   assert(vk_format_get_plane_count(src_format) == 1);
+   assert(vk_format_get_plane_count(dst_format) == 1);
+
    const VkColorComponentFlags full_cmask = VK_COLOR_COMPONENT_R_BIT |
                                             VK_COLOR_COMPONENT_G_BIT |
                                             VK_COLOR_COMPONENT_B_BIT |
@@ -4407,19 +4551,46 @@ v3dv_CmdBlitImage2KHR(VkCommandBuffer commandBuffer,
 
    cmd_buffer->state.is_transfer = true;
 
+   struct v3dv_image *src_aliases[V3DV_MAX_PLANE_COUNT] = {};
+   struct v3dv_image *dst_aliases[V3DV_MAX_PLANE_COUNT] = {};
+
+   init_image_aliases(cmd_buffer, src_aliases, src);
+   init_image_aliases(cmd_buffer, dst_aliases, dst);
+
    for (uint32_t i = 0; i < pBlitImageInfo->regionCount; i++) {
-      if (blit_tfu(cmd_buffer, dst, src, &pBlitImageInfo->pRegions[i]))
+      VkImageBlit2 region = pBlitImageInfo->pRegions[i];
+
+      uint8_t src_plane =
+         v3dv_plane_from_aspect(region.srcSubresource.aspectMask);
+      uint8_t dst_plane =
+         v3dv_plane_from_aspect(region.dstSubresource.aspectMask);
+
+      if (src->plane_count > 1)
+         region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      if (dst->plane_count > 1)
+         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+      struct v3dv_image *src_alias = src_aliases[src_plane];
+      struct v3dv_image *dst_alias = dst_aliases[dst_plane];
+
+      assert(src_alias);
+      assert(dst_alias);
+
+      if (blit_tfu(cmd_buffer, dst_alias, src_alias, &region))
          continue;
       if (blit_shader(cmd_buffer,
-                      dst, dst->vk.format,
-                      src, src->vk.format,
+                      dst_alias, dst_alias->vk.format,
+                      src_alias, src_alias->vk.format,
                       0, NULL,
-                      &pBlitImageInfo->pRegions[i],
+                      &region,
                       pBlitImageInfo->filter, true)) {
          continue;
       }
       unreachable("Unsupported blit operation");
    }
+
+   cleanup_image_aliases(cmd_buffer, src_aliases, src);
+   cleanup_image_aliases(cmd_buffer, dst_aliases, dst);
 
    cmd_buffer->state.is_transfer = false;
 }
