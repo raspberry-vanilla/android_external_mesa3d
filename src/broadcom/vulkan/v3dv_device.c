@@ -68,7 +68,12 @@
 #include "drm-uapi/i915_drm.h"
 #endif
 
-#define V3DV_API_VERSION VK_MAKE_VERSION(1, 1, VK_HEADER_VERSION)
+#ifndef ANDROID
+#   define V3DV_API_VERSION VK_MAKE_VERSION(1, 1, VK_HEADER_VERSION)
+#else
+/* Android CDD require additional extensions for API v1.1+ */
+#   define V3DV_API_VERSION VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION)
+#endif
 
 VKAPI_ATTR VkResult VKAPI_CALL
 v3dv_EnumerateInstanceVersion(uint32_t *pApiVersion)
