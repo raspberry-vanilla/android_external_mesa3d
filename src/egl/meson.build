@@ -127,14 +127,8 @@ if with_dri2
     incs_for_egl += include_directories('wayland/wayland-drm')
   endif
   if with_platform_android
-    deps_for_egl += dep_android
+    deps_for_egl += [dep_android, idep_android_buffer]
     files_egl += files('drivers/dri2/platform_android.c')
-    if dep_android_mapper4.found()
-      files_egl += files('drivers/dri2/platform_android_mapper.cpp')
-      c_args_for_egl += '-DUSE_IMAPPER4_METADATA_API'
-      cpp_args_for_egl += '-DUSE_IMAPPER4_METADATA_API'
-      override_for_egl += 'cpp_std=c++17'
-    endif
   endif
 elif with_platform_haiku
   incs_for_egl += inc_haikugl
