@@ -314,8 +314,8 @@ struct dri2_egl_display {
 
 #ifdef HAVE_ANDROID_PLATFORM
    struct u_gralloc *gralloc;
-   /* gralloc vendor usage bit for front rendering */
-   uint32_t front_rendering_usage;
+   /* gralloc usage bit for front rendering */
+   uint64_t front_rendering_usage;
 #endif
 };
 
@@ -402,7 +402,7 @@ struct dri2_egl_surface {
       struct ANativeWindowBuffer *buffer;
       int age;
    } *color_buffers, *back;
-   uint32_t gralloc_usage;
+   uint64_t gralloc_usage;
 #endif
 
    /* surfaceless and device */
