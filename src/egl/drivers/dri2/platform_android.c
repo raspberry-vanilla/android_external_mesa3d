@@ -255,7 +255,6 @@ droid_window_cancel_buffer(struct dri2_egl_surface *dri2_surf)
 static bool
 droid_set_shared_buffer_mode(_EGLDisplay *disp, _EGLSurface *surf, bool mode)
 {
-#if ANDROID_API_LEVEL >= 24
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    struct dri2_egl_surface *dri2_surf = dri2_egl_surface(surf);
    struct ANativeWindow *window = dri2_surf->window;
@@ -284,10 +283,6 @@ droid_set_shared_buffer_mode(_EGLDisplay *disp, _EGLSurface *surf, bool mode)
    }
 
    return true;
-#else
-   _eglLog(_EGL_FATAL, "%s:%d: internal error: unreachable", __FILE__, __LINE__);
-   return false;
-#endif
 }
 
 static _EGLSurface *
@@ -1350,7 +1345,6 @@ dri2_initialize_android(_EGLDisplay *disp)
    disp->Extensions.KHR_image = EGL_TRUE;
 
    dri2_dpy->front_rendering_usage = 0;
-#if ANDROID_API_LEVEL >= 24
    if (dri2_dpy->mutable_render_buffer &&
        dri2_dpy->loader_extensions == droid_image_loader_extensions &&
        /* In big GL, front rendering is done at the core API level by directly
@@ -1364,6 +1358,12 @@ dri2_initialize_android(_EGLDisplay *disp)
         */
        (disp->ClientAPIs & ~(EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT |
                              EGL_OPENGL_ES3_BIT_KHR)) == 0) {
+
+#if ANDROID_API_LEVEL >= 33
+      /* align with BufferUsage::FRONT_BUFFER */
+      dri2_dpy->front_rendering_usage = 1UL << 32;
+      disp->Extensions.KHR_mutable_render_buffer = EGL_TRUE;
+#else
       /* For cros gralloc, if the front rendering query is supported, then all
        * available window surface configs support front rendering because:
        *
@@ -1385,8 +1385,8 @@ dri2_initialize_android(_EGLDisplay *disp)
          dri2_dpy->front_rendering_usage = front_rendering_usage;
          disp->Extensions.KHR_mutable_render_buffer = EGL_TRUE;
       }
+#endif /* ANDROID_API_LEVEL >= 33 */
    }
-#endif
 
    /* Create configs *after* enabling extensions because presence of DRI
     * driver extensions can affect the capabilities of EGLConfigs.
