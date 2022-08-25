@@ -63,7 +63,7 @@
 #include "wayland-drm-client-protocol.h"
 #endif
 
-#if !defined(ANDROID) || ANDROID_API_LEVEL <= 32
+#if !defined(ANDROID) || ANDROID_API_LEVEL >= 33
 #   define V3DV_API_VERSION VK_MAKE_VERSION(1, 2, VK_HEADER_VERSION)
 #else
 /* Android 12.1 and lower support only Vulkan API v1.1 */
