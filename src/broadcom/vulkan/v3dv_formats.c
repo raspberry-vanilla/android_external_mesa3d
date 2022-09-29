@@ -218,6 +218,12 @@ image_format_features(struct v3dv_physical_device *pdevice,
                                            tiling);
    }
 
+   if (vk_format_get_ycbcr_info(vk_format)) {
+      if (flags & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)
+         flags |= VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT;
+      flags |= VK_FORMAT_FEATURE_2_DISJOINT_BIT;
+   }
+
    if (flags & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT &&
        v3dv_format->supports_filtering) {
       flags |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
@@ -445,7 +451,9 @@ get_image_format_properties(
 
    if (view_usage & (VK_IMAGE_USAGE_SAMPLED_BIT |
                      VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) {
-      if (!(format_feature_flags & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT)) {
+      if (!(format_feature_flags &
+            (VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT))) {
          goto unsupported;
       }
 
@@ -538,6 +546,11 @@ get_image_format_properties(
 
    pImageFormatProperties->maxResourceSize = 0xffffffff; /* 32-bit allocation */
 
+   if (pYcbcrImageFormatProperties) {
+      pYcbcrImageFormatProperties->combinedImageSamplerDescriptorCount =
+          vk_format_get_plane_count(info->format);
+   }
+
    return VK_SUCCESS;
 
 unsupported:
@@ -598,6 +611,7 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
    const VkPhysicalDeviceExternalImageFormatInfo *external_info = NULL;
    const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_format_mod_info = NULL;
    VkExternalImageFormatProperties *external_props = NULL;
+   VkSamplerYcbcrConversionImageFormatProperties *ycbcr_props = NULL;
    VkImageTiling tiling = base_info->tiling;
 
    /* Extract input structs */
@@ -637,6 +651,9 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
          external_props = (void *) s;
          break;
+      case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
+         ycbcr_props = (void *) s;
+         break;
       default:
          v3dv_debug_ignored_stype(s->sType);
          break;
@@ -645,7 +662,8 @@ v3dv_GetPhysicalDeviceImageFormatProperties2(VkPhysicalDevice physicalDevice,
 
    VkResult result =
       get_image_format_properties(physical_device, base_info, tiling,
-                                  &base_props->imageFormatProperties, NULL);
+                                  &base_props->imageFormatProperties,
+                                  ycbcr_props);
    if (result != VK_SUCCESS)
       goto done;
 

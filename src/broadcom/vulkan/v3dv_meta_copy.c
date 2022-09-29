@@ -955,6 +955,7 @@ copy_image_tlb(struct v3dv_cmd_buffer *cmd_buffer,
     */
    assert(region->dstSubresource.aspectMask ==
           region->srcSubresource.aspectMask);
+
    uint32_t internal_type, internal_bpp;
    v3dv_X(cmd_buffer->device, get_internal_type_bpp_for_image_aspects)
       (fb_format, region->dstSubresource.aspectMask,
@@ -1066,13 +1067,18 @@ create_single_plane_alias(struct v3dv_cmd_buffer *cmd_buffer,
 
    VkDevice _device = v3dv_device_to_handle(cmd_buffer->device);
 
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(src->vk.format);
+
    VkImageCreateInfo info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = src->vk.image_type,
       .format = vk_format_get_plane_format(src->vk.format, plane),
       .extent = {
-         .width = src->vk.extent.width,
-         .height = src->vk.extent.height,
+         .width = src->vk.extent.width /
+            ycbcr_info->planes[plane].denominator_scales[0],
+         .height = src->vk.extent.height /
+            ycbcr_info->planes[plane].denominator_scales[1],
          .depth = src->vk.extent.depth
       },
       .mipLevels = src->vk.mip_levels,
@@ -1137,6 +1143,10 @@ copy_image_blit(struct v3dv_cmd_buffer *cmd_buffer,
                 struct v3dv_image *src,
                 const VkImageCopy2 *region)
 {
+   if (src->vk.tiling == VK_IMAGE_TILING_LINEAR &&
+       src->vk.image_type != VK_IMAGE_TYPE_1D)
+      return false;
+
    const uint32_t src_block_w = vk_format_get_blockwidth(src->vk.format);
    const uint32_t src_block_h = vk_format_get_blockheight(src->vk.format);
    const uint32_t dst_block_w = vk_format_get_blockwidth(dst->vk.format);
