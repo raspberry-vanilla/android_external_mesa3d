@@ -2042,6 +2042,9 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
 fail:
    cnd_destroy(&device->query_ended);
    mtx_destroy(&device->query_mutex);
+   queue_finish(&device->queue);
+   destroy_device_meta(device);
+   v3dv_pipeline_cache_finish(&device->default_pipeline_cache);
    vk_device_finish(&device->vk);
 #ifdef ANDROID
    destroy_gralloc(&device->gralloc);
