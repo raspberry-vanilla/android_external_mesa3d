@@ -576,7 +576,6 @@ v3dv_DestroyImage(VkDevice _device,
       return;
 
 #ifdef ANDROID
-   assert(image->plane_count == 1);
    if (image->is_native_buffer_memory)
       v3dv_FreeMemory(_device,
                       v3dv_device_memory_to_handle(image->planes[0].mem),
