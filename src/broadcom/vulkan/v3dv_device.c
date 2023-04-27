@@ -151,9 +151,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_shader_float_controls            = true,
       .KHR_shader_non_semantic_info         = true,
       .KHR_sampler_mirror_clamp_to_edge     = true,
-#ifndef ANDROID
       .KHR_sampler_ycbcr_conversion         = true,
-#endif
       .KHR_spirv_1_4                        = true,
       .KHR_storage_buffer_storage_class     = true,
       .KHR_timeline_semaphore               = true,
@@ -1244,11 +1242,7 @@ v3dv_GetPhysicalDeviceFeatures2(VkPhysicalDevice physicalDevice,
       /* FIXME: this needs support for non-constant index on UBO/SSBO */
       .variablePointers = false,
       .protectedMemory = false,
-#ifdef ANDROID
-      .samplerYcbcrConversion = false,
-#else
       .samplerYcbcrConversion = true,
-#endif
       .shaderDrawParameters = false,
    };
 
