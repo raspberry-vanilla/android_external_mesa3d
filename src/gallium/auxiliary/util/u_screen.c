@@ -428,7 +428,7 @@ u_pipe_screen_get_param_defaults(struct pipe_screen *pscreen,
       return 0;
 
    case PIPE_CAP_THROTTLE:
-#if defined(PIPE_OS_ANDROID)
+#if defined(DETECT_OS_ANDROID)
       return 0;
 #else
       return 1;
