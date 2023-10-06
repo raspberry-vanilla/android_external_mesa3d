@@ -95,6 +95,7 @@ MESON_GEN_NINJA := \
 	-Dllvm=$(if $(MESON_GEN_LLVM_STUB),enabled,disabled)                         \
 	-Dcpp_rtti=false                                                             \
 	-Dlmsensors=disabled                                                         \
+	-Dandroid-libbacktrace=disabled                                              \
 
 MESON_BUILD := MESA_GIT_SHA1_OVERRIDE=$(MESA_GIT_SHA1) PATH=/usr/bin:/bin:/sbin:$$PATH ninja -C $(MESON_OUT_DIR)/build
 
