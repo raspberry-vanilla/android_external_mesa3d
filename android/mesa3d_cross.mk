@@ -63,7 +63,6 @@ MESON_OUT_DIR                            := $($(M_TARGET_PREFIX)TARGET_OUT_INTER
 MESON_GEN_DIR                            := $(MESON_OUT_DIR)_GEN
 MESON_GEN_FILES_TARGET                   := $(MESON_GEN_DIR)/.timestamp
 
-MESA3D_GALLIUM_DIR                       := $(MESON_OUT_DIR)/install/usr/local/lib
 $(M_TARGET_PREFIX)MESA3D_GALLIUM_BIN     := $(MESON_OUT_DIR)/install/usr/local/lib/libgallium_dri.so
 $(M_TARGET_PREFIX)MESA3D_LIBEGL_BIN      := $(MESON_OUT_DIR)/install/usr/local/lib/libEGL.so
 $(M_TARGET_PREFIX)MESA3D_LIBGLESV1_BIN   := $(MESON_OUT_DIR)/install/usr/local/lib/libGLESv1_CM.so
@@ -73,7 +72,7 @@ $(M_TARGET_PREFIX)MESA3D_LIBGBM_BIN      := $(MESON_OUT_DIR)/install/usr/local/l
 
 
 MESA3D_GLES_BINS := \
-    $($(M_TARGET_PREFIX)MESA3D_GALLIUM_BIN) \
+    $($(M_TARGET_PREFIX)MESA3D_GALLIUM_BIN)   \
     $($(M_TARGET_PREFIX)MESA3D_LIBEGL_BIN)    \
     $($(M_TARGET_PREFIX)MESA3D_LIBGLESV1_BIN) \
     $($(M_TARGET_PREFIX)MESA3D_LIBGLESV2_BIN) \
