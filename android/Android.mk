@@ -30,8 +30,10 @@ LIBDRM_VERSION = $(shell cat external/libdrm/meson.build | grep -o "\<version\>\
 LLVM_VERSION_MAJOR = $(shell \
     if [ -f external/llvm-project/cmake/Modules/LLVMVersion.cmake ]; then \
         grep 'set.LLVM_VERSION_MAJOR ' external/llvm-project/cmake/Modules/LLVMVersion.cmake | grep -o '[0-9]\+'; \
-    else \
+    elif [ -f external/llvm-project/llvm/CMakeLists.txt ]; then \
         grep 'set.LLVM_VERSION_MAJOR ' external/llvm-project/llvm/CMakeLists.txt | grep -o '[0-9]\+'; \
+    else \
+        echo '12' \
     fi)
 
 MESA_VK_LIB_SUFFIX_amd := radeon
