@@ -514,6 +514,17 @@ print_regs(ra_ctx& ctx, PhysRegInterval regs, const RegisterFile& reg_file)
    }
 }
 
+bool
+is_sgpr_writable_without_side_effects(amd_gfx_level gfx_level, PhysReg reg)
+{
+   assert(reg < 256);
+   bool has_flat_scr_lo_gfx89 = gfx_level >= GFX8 && gfx_level <= GFX9;
+   bool has_flat_scr_lo_gfx7_or_xnack_mask = gfx_level <= GFX9;
+   return (reg <= vcc_hi || reg == m0) &&
+          (!has_flat_scr_lo_gfx89 || (reg != flat_scr_lo && reg != flat_scr_hi)) &&
+          (!has_flat_scr_lo_gfx7_or_xnack_mask || (reg != 104 || reg != 105));
+}
+
 unsigned
 get_subdword_operand_stride(amd_gfx_level gfx_level, const aco_ptr<Instruction>& instr,
                             unsigned idx, RegClass rc)
@@ -2081,6 +2092,14 @@ operand_can_use_reg(amd_gfx_level gfx_level, aco_ptr<Instruction>& instr, unsign
               gfx_level >= GFX10); /* sdata can be vcc */
    case Format::MUBUF:
    case Format::MTBUF: return idx != 2 || gfx_level < GFX12 || reg != scc;
+   case Format::SOPK:
+      if (idx == 0 && reg == scc)
+         return false;
+      FALLTHROUGH;
+   case Format::SOP2:
+   case Format::SOP1:
+      return get_op_fixed_to_def(instr.get()) != (int)idx ||
+             is_sgpr_writable_without_side_effects(gfx_level, reg);
    default:
       // TODO: there are more instructions with restrictions on registers
       return true;
@@ -2883,7 +2902,8 @@ optimize_encoding_sopk(ra_ctx& ctx, RegisterFile& register_file, aco_ptr<Instruc
       return;
    unsigned literal_idx = instr->operands[1].isLiteral();
 
-   if (instr->operands[!literal_idx].physReg() >= 128)
+   PhysReg op_reg = instr->operands[!literal_idx].physReg();
+   if (!is_sgpr_writable_without_side_effects(ctx.program->gfx_level, op_reg))
       return;
 
    unsigned def_id = instr->definitions[0].tempId();
