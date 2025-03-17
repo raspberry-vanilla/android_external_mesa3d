@@ -184,7 +184,7 @@ $(foreach driver,$(BOARD_MESA3D_VULKAN_DRIVERS), \
     $(eval $(call mesa3d-lib,vulkan.$(MESA_VK_LIB_SUFFIX_$(driver)),hw,MESA3D_VULKAN_$(driver)_BIN)))
 
 ifneq ($(filter true, $(BOARD_MESA3D_BUILD_LIBGBM)),)
-# Module 'libgbm', produces '/vendor/lib{64}/libgbm.so'
+# Module 'libgbm_mesa', produces '/vendor/lib{64}/libgbm_mesa.so'
 $(eval $(call mesa3d-lib,$(MESA_LIBGBM_NAME),,MESA3D_LIBGBM_BIN,$(MESA3D_TOP)/src/gbm/main))
 # Module 'dri_gbm', produces '/vendor/lib{64}/dri_gbm.so'
 $(eval $(call mesa3d-lib,dri_gbm,,MESA3D_DRI_GBM_BIN))
