@@ -539,6 +539,7 @@ static const struct nir_shader_compiler_options gallivm_nir_options = {
    .lower_pack_unorm_2x16 = true,
    .lower_pack_unorm_4x8 = true,
    .lower_pack_half_2x16 = true,
+   .lower_pack_64_4x16 = true,
    .lower_pack_split = true,
    .lower_unpack_snorm_2x16 = true,
    .lower_unpack_snorm_4x8 = true,
@@ -835,6 +836,12 @@ llvmpipe_destroy_screen(struct pipe_screen *_screen)
 #if defined(HAVE_LIBDRM) && defined(HAVE_LINUX_UDMABUF_H)
    if (screen->udmabuf_fd != -1)
       close(screen->udmabuf_fd);
+   if (screen->dummy_sync_fd != -1)
+      close(screen->dummy_sync_fd);
+   if (screen->dummy_dmabuf) {
+      _screen->free_memory_fd(_screen,
+                              (struct pipe_memory_allocation*)screen->dummy_dmabuf);
+   }
 #endif
 
 #if DETECT_OS_LINUX

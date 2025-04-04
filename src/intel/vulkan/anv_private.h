@@ -1295,6 +1295,7 @@ struct anv_instance {
      */
     uint8_t                                     assume_full_subgroups;
     bool                                        assume_full_subgroups_with_barrier;
+    bool                                        assume_full_subgroups_with_shared_memory;
     bool                                        limit_trig_input_range;
     bool                                        sample_mask_out_opengl_behaviour;
     bool                                        force_filter_addr_rounding;
@@ -1624,6 +1625,7 @@ struct anv_gfx_dynamic_state {
       uint32_t Kernel0SIMDWidth;
       uint32_t Kernel1SIMDWidth;
       uint32_t Kernel0PolyPackingPolicy;
+      uint32_t Kernel0MaximumPolysperThread;
    } ps;
 
    /* 3DSTATE_PS_EXTRA */

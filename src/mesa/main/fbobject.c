@@ -109,6 +109,17 @@ _mesa_get_incomplete_framebuffer(void)
    return &IncompleteFramebuffer;
 }
 
+static struct gl_renderbuffer *
+_mesa_lookup_renderbuffer_locked(struct gl_context *ctx, GLuint id)
+{
+   if (id == 0)
+      return NULL;
+
+   struct gl_renderbuffer *rb = (struct gl_renderbuffer *)
+      _mesa_HashLookupLocked(&ctx->Shared->RenderBuffers, id);
+   return rb;
+}
+
 /**
  * Helper routine for getting a gl_renderbuffer.
  */
@@ -146,6 +157,17 @@ _mesa_lookup_renderbuffer_err(struct gl_context *ctx, GLuint id,
    return rb;
 }
 
+static struct gl_framebuffer *
+_mesa_lookup_framebuffer_locked(struct gl_context *ctx, GLuint id)
+{
+   if (id == 0)
+      return NULL;
+
+   struct gl_framebuffer *fb = (struct gl_framebuffer *)
+      _mesa_HashLookupLocked(&ctx->Shared->FrameBuffers, id);
+
+   return fb;
+}
 
 /**
  * Helper routine for getting a gl_framebuffer.
@@ -169,27 +191,29 @@ struct gl_framebuffer *
 _mesa_lookup_framebuffer_dsa(struct gl_context *ctx, GLuint id,
                              const char* func)
 {
-   struct gl_framebuffer *fb;
-
    if (id == 0)
       return NULL;
 
-   fb = _mesa_lookup_framebuffer(ctx, id);
+   _mesa_HashLockMutex(&ctx->Shared->FrameBuffers);
+   struct gl_framebuffer *fb = _mesa_lookup_framebuffer_locked(ctx, id);
 
    /* Name exists but buffer is not initialized */
    if (fb == &DummyFramebuffer) {
       fb = _mesa_new_framebuffer(ctx, id);
-      _mesa_HashInsert(&ctx->Shared->FrameBuffers, id, fb);
+      _mesa_HashInsertLocked(&ctx->Shared->FrameBuffers, id, fb);
    }
    /* Name doesn't exist */
    else if (!fb) {
       fb = _mesa_new_framebuffer(ctx, id);
       if (!fb) {
          _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", func);
+         _mesa_HashUnlockMutex(&ctx->Shared->FrameBuffers);
          return NULL;
       }
-      _mesa_HashInsert(&ctx->Shared->FrameBuffers, id, fb);
+      _mesa_HashInsertLocked(&ctx->Shared->FrameBuffers, id, fb);
    }
+   _mesa_HashUnlockMutex(&ctx->Shared->FrameBuffers);
+
    return fb;
 }
 
@@ -1286,6 +1310,7 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
    GLenum layer_tex_target = 0;
    bool has_depth_attachment = false;
    bool has_stencil_attachment = false;
+   GLsizei num_views = 0;
 
    assert(_mesa_is_user_fbo(fb));
 
@@ -1553,6 +1578,7 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
       }
       if (!layer_info_valid) {
          is_layered = att->Layered;
+         num_views = att->NumViews;
          max_layer_count = att_layer_count;
          layer_info_valid = true;
       } else if (max_layer_count > 0 && layer_tex_target &&
@@ -1564,6 +1590,12 @@ _mesa_test_framebuffer_completeness(struct gl_context *ctx,
          fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS;
          fbo_incomplete(ctx,
                         "framebuffer attachment layer mode is inconsistent",
+                        i);
+         return;
+      } else if (num_views != att->NumViews) {
+         fb->_Status = GL_FRAMEBUFFER_INCOMPLETE_VIEW_TARGETS_OVR;
+         fbo_incomplete(ctx,
+                        "framebuffer attachment view count is inconsistent",
                         i);
          return;
       } else if (att_layer_count > max_layer_count) {
@@ -1778,7 +1810,8 @@ bind_renderbuffer(GLenum target, GLuint renderbuffer)
     */
 
    if (renderbuffer) {
-      newRb = _mesa_lookup_renderbuffer(ctx, renderbuffer);
+      _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
+      newRb = _mesa_lookup_renderbuffer_locked(ctx, renderbuffer);
       if (newRb == &DummyRenderbuffer) {
          /* ID was reserved, but no real renderbuffer object made yet */
          newRb = NULL;
@@ -1787,15 +1820,15 @@ bind_renderbuffer(GLenum target, GLuint renderbuffer)
          /* All RB IDs must be Gen'd */
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glBindRenderbuffer(non-gen name)");
+         _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
          return;
       }
 
       if (!newRb) {
-         _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
          newRb = allocate_renderbuffer_locked(ctx, renderbuffer,
                                               "glBindRenderbufferEXT");
-         _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
       }
+      _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
    }
    else {
       newRb = NULL;
@@ -3025,13 +3058,16 @@ _mesa_NamedRenderbufferStorageEXT(GLuint renderbuffer, GLenum internalformat,
                                   GLsizei width, GLsizei height)
 {
    GET_CURRENT_CONTEXT(ctx);
-   struct gl_renderbuffer *rb = _mesa_lookup_renderbuffer(ctx, renderbuffer);
+
+   _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
+   struct gl_renderbuffer *rb =
+      _mesa_lookup_renderbuffer_locked(ctx, renderbuffer);
    if (!rb || rb == &DummyRenderbuffer) {
-      _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
       rb = allocate_renderbuffer_locked(ctx, renderbuffer,
                                         "glNamedRenderbufferStorageEXT");
-      _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
    }
+   _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
+
    renderbuffer_storage(ctx, rb, internalformat, width, height, NO_SAMPLES,
                         0, "glNamedRenderbufferStorageEXT");
 }
@@ -3054,13 +3090,16 @@ _mesa_NamedRenderbufferStorageMultisampleEXT(GLuint renderbuffer, GLsizei sample
                                              GLsizei width, GLsizei height)
 {
    GET_CURRENT_CONTEXT(ctx);
-   struct gl_renderbuffer *rb = _mesa_lookup_renderbuffer(ctx, renderbuffer);
+
+   _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
+   struct gl_renderbuffer *rb =
+      _mesa_lookup_renderbuffer_locked(ctx, renderbuffer);
    if (!rb || rb == &DummyRenderbuffer) {
-      _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
       rb = allocate_renderbuffer_locked(ctx, renderbuffer,
                                         "glNamedRenderbufferStorageMultisampleEXT");
-      _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
    }
+   _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
+
    renderbuffer_storage(ctx, rb, internalformat, width, height,
                         samples, samples,
                         "glNamedRenderbufferStorageMultisample");
@@ -3172,13 +3211,14 @@ _mesa_GetNamedRenderbufferParameterivEXT(GLuint renderbuffer, GLenum pname,
 {
    GET_CURRENT_CONTEXT(ctx);
 
-   struct gl_renderbuffer *rb = _mesa_lookup_renderbuffer(ctx, renderbuffer);
+   _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
+   struct gl_renderbuffer *rb =
+      _mesa_lookup_renderbuffer_locked(ctx, renderbuffer);
    if (!rb || rb == &DummyRenderbuffer) {
-      _mesa_HashLockMutex(&ctx->Shared->RenderBuffers);
       rb = allocate_renderbuffer_locked(ctx, renderbuffer,
                                         "glGetNamedRenderbufferParameterivEXT");
-      _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
    }
+   _mesa_HashUnlockMutex(&ctx->Shared->RenderBuffers);
 
    get_render_buffer_parameteriv(ctx, rb, pname, params,
                                  "glGetNamedRenderbufferParameterivEXT");
@@ -3270,14 +3310,17 @@ bind_framebuffer(GLenum target, GLuint framebuffer)
    }
 
    if (framebuffer) {
+      _mesa_HashLockMutex(&ctx->Shared->FrameBuffers);
+
       /* Binding a user-created framebuffer object */
-      newDrawFb = _mesa_lookup_framebuffer(ctx, framebuffer);
+      newDrawFb = _mesa_lookup_framebuffer_locked(ctx, framebuffer);
       if (newDrawFb == &DummyFramebuffer) {
          /* ID was reserved, but no real framebuffer object made yet */
          newDrawFb = NULL;
       }
       else if (!newDrawFb && _mesa_is_desktop_gl_core(ctx)) {
          /* All FBO IDs must be Gen'd */
+         _mesa_HashUnlockMutex(&ctx->Shared->FrameBuffers);
          _mesa_error(ctx, GL_INVALID_OPERATION,
                      "glBindFramebuffer(non-gen name)");
          return;
@@ -3287,11 +3330,13 @@ bind_framebuffer(GLenum target, GLuint framebuffer)
          /* create new framebuffer object */
          newDrawFb = _mesa_new_framebuffer(ctx, framebuffer);
          if (!newDrawFb) {
+            _mesa_HashUnlockMutex(&ctx->Shared->FrameBuffers);
             _mesa_error(ctx, GL_OUT_OF_MEMORY, "glBindFramebufferEXT");
             return;
          }
-         _mesa_HashInsert(&ctx->Shared->FrameBuffers, framebuffer, newDrawFb);
+         _mesa_HashInsertLocked(&ctx->Shared->FrameBuffers, framebuffer, newDrawFb);
       }
+      _mesa_HashUnlockMutex(&ctx->Shared->FrameBuffers);
       newReadFb = newDrawFb;
    }
    else {
@@ -3631,6 +3676,7 @@ reuse_framebuffer_texture_attachment(struct gl_framebuffer *fb,
    dst_att->CubeMapFace = src_att->CubeMapFace;
    dst_att->Zoffset = src_att->Zoffset;
    dst_att->Layered = src_att->Layered;
+   dst_att->NumViews = src_att->NumViews;
 }
 
 
@@ -3762,6 +3808,12 @@ check_multiview_texture_target(struct gl_context *ctx, GLuint texture, GLenum ta
    {
       _mesa_error(ctx, GL_INVALID_VALUE,
          "%s baseViewIndex is less than 0)", caller);
+      ret = false;
+   }
+   else if (baseViewIndex + numViews > ctx->Const.MaxArrayTextureLayers)
+   {
+      _mesa_error(ctx, GL_INVALID_VALUE,
+         "%s baseViewIndex + numViews > GL_MAX_ARRAY_TEXTURE_LAYERS", caller);
       ret = false;
    }
 
@@ -4023,7 +4075,8 @@ _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
           _mesa_tex_target_to_face(textarget) ==
           fb->Attachment[BUFFER_STENCIL].CubeMapFace &&
           samples == fb->Attachment[BUFFER_STENCIL].NumSamples &&
-          layer == fb->Attachment[BUFFER_STENCIL].Zoffset) {
+          layer == fb->Attachment[BUFFER_STENCIL].Zoffset &&
+          numviews == fb->Attachment[BUFFER_STENCIL].NumViews) {
          /* The texture object is already attached to the stencil attachment
           * point. Don't create a new renderbuffer; just reuse the stencil
           * attachment's. This is required to prevent a GL error in
@@ -4037,7 +4090,8 @@ _mesa_framebuffer_texture(struct gl_context *ctx, struct gl_framebuffer *fb,
                  _mesa_tex_target_to_face(textarget) ==
                  fb->Attachment[BUFFER_DEPTH].CubeMapFace &&
                  samples == fb->Attachment[BUFFER_DEPTH].NumSamples &&
-                 layer == fb->Attachment[BUFFER_DEPTH].Zoffset) {
+                 layer == fb->Attachment[BUFFER_DEPTH].Zoffset &&
+                 numviews == fb->Attachment[BUFFER_DEPTH].NumViews) {
          /* As above, but with depth and stencil transposed. */
          reuse_framebuffer_texture_attachment(fb, BUFFER_STENCIL,
                                               BUFFER_DEPTH);
@@ -5033,6 +5087,30 @@ get_framebuffer_attachment_parameter(struct gl_context *ctx,
          goto invalid_pname_enum;
       } else if (att->Type == GL_TEXTURE) {
          *params = att->NumSamples;
+      } else if (att->Type == GL_NONE) {
+         _mesa_error(ctx, err, "%s(invalid pname %s)", caller,
+                     _mesa_enum_to_string(pname));
+      } else {
+         goto invalid_pname_enum;
+      }
+      return;
+   case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_NUM_VIEWS_OVR:
+      if (!ctx->Extensions.OVR_multiview) {
+         goto invalid_pname_enum;
+      } else if (att->Type == GL_TEXTURE) {
+         *params = att->NumViews;
+      } else if (att->Type == GL_NONE) {
+         _mesa_error(ctx, err, "%s(invalid pname %s)", caller,
+                     _mesa_enum_to_string(pname));
+      } else {
+         goto invalid_pname_enum;
+      }
+      return;
+   case GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_BASE_VIEW_INDEX_OVR:
+      if (!ctx->Extensions.OVR_multiview) {
+         goto invalid_pname_enum;
+      } else if (att->Type == GL_TEXTURE) {
+         *params = att->NumViews > 0 ? att->Zoffset : 0;
       } else if (att->Type == GL_NONE) {
          _mesa_error(ctx, err, "%s(invalid pname %s)", caller,
                      _mesa_enum_to_string(pname));

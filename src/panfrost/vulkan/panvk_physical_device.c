@@ -253,6 +253,32 @@ get_device_extensions(const struct panvk_physical_device *device,
    };
 }
 
+static bool
+has_compressed_formats(const struct panvk_physical_device *physical_device,
+                       const uint32_t required_formats)
+{
+   uint32_t supported_compr_fmts =
+      panfrost_query_compressed_formats(&physical_device->kmod.props);
+
+   return (supported_compr_fmts & required_formats) == required_formats;
+}
+
+static bool
+has_texture_compression_etc2(const struct panvk_physical_device *physical_device)
+{
+   return has_compressed_formats(physical_device,
+      BITFIELD_BIT(MALI_ETC2_RGB8) |
+      BITFIELD_BIT(MALI_ETC2_RGB8A1) | BITFIELD_BIT(MALI_ETC2_RGBA8) |
+      BITFIELD_BIT(MALI_ETC2_R11_UNORM) | BITFIELD_BIT(MALI_ETC2_R11_SNORM) |
+      BITFIELD_BIT(MALI_ETC2_RG11_UNORM) | BITFIELD_BIT(MALI_ETC2_RG11_SNORM));
+}
+
+static bool
+has_texture_compression_astc_ldr(const struct panvk_physical_device *physical_device)
+{
+   return has_compressed_formats(physical_device, BITFIELD_BIT(MALI_ASTC_2D_LDR));
+}
+
 static void
 get_features(const struct panvk_physical_device *device,
              struct vk_features *features)
@@ -273,8 +299,8 @@ get_features(const struct panvk_physical_device *device,
       .largePoints = true,
       .occlusionQueryPrecise = true,
       .samplerAnisotropy = true,
-      .textureCompressionETC2 = true,
-      .textureCompressionASTC_LDR = true,
+      .textureCompressionETC2 = has_texture_compression_etc2(device),
+      .textureCompressionASTC_LDR = has_texture_compression_astc_ldr(device),
       .fragmentStoresAndAtomics = arch >= 10,
       .shaderUniformBufferArrayDynamicIndexing = true,
       .shaderSampledImageArrayDynamicIndexing = true,
@@ -1197,6 +1223,7 @@ get_format_properties(struct panvk_physical_device *physical_device,
          buffer |= VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT;
 
       tex |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+      tex |= VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
    }
 
    if (fmt.bind & PAN_BIND_RENDER_TARGET) {
@@ -1243,18 +1270,20 @@ panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
 
    VkDrmFormatModifierPropertiesListEXT *list = vk_find_struct(
       pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
-   if (list && pFormatProperties->formatProperties.linearTilingFeatures) {
+   if (list) {
       VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                              list->pDrmFormatModifierProperties,
                              &list->drmFormatModifierCount);
 
-      vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
-                               mod_props)
-      {
-         mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
-         mod_props->drmFormatModifierPlaneCount = 1;
-         mod_props->drmFormatModifierTilingFeatures =
-            pFormatProperties->formatProperties.linearTilingFeatures;
+      if (pFormatProperties->formatProperties.linearTilingFeatures) {
+         vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
+                                  mod_props)
+         {
+            mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
+            mod_props->drmFormatModifierPlaneCount = 1;
+            mod_props->drmFormatModifierTilingFeatures =
+               pFormatProperties->formatProperties.linearTilingFeatures;
+         }
       }
    }
 }

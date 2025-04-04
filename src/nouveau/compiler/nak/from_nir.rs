@@ -537,8 +537,15 @@ impl<'a> ShaderFromNir<'a> {
                 let mut comps = Vec::new();
                 match src_bit_size {
                     1 | 32 | 64 => {
-                        for (ssa, _) in srcs {
-                            comps.push(ssa);
+                        for (ssa, byte) in srcs {
+                            assert!(byte == 0);
+                            // Always insert a copy regardless of whether or not
+                            // we need to permute bytes.  It's possible that the
+                            // source is uniform but the destination is not and
+                            // we'll need a copy in that case.  If the copy
+                            // isn't needed, copy-prop should clean it up for
+                            // us.
+                            comps.push(b.copy(ssa.into())[0]);
                         }
                     }
                     8 => {
@@ -2305,11 +2312,12 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
-                let mem_order = if intrin.intrinsic
-                    == nir_intrinsic_load_global_constant
-                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
-                {
-                    MemOrder::Constant
+                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
+                    if self.sm.sm() >= 80 {
+                        MemOrder::Constant
+                    } else {
+                        MemOrder::Weak
+                    }
                 } else {
                     MemOrder::Strong(MemScope::System)
                 };
@@ -2339,11 +2347,12 @@ impl<'a> ShaderFromNir<'a> {
                 let coord = self.get_image_coord(intrin, dim);
                 // let sample = self.get_src(&srcs[2]);
 
-                let mem_order = if intrin.intrinsic
-                    == nir_intrinsic_load_global_constant
-                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
-                {
-                    MemOrder::Constant
+                let mem_order = if (intrin.access() & ACCESS_CAN_REORDER) != 0 {
+                    if self.sm.sm() >= 80 {
+                        MemOrder::Constant
+                    } else {
+                        MemOrder::Weak
+                    }
                 } else {
                     MemOrder::Strong(MemScope::System)
                 };
@@ -3379,7 +3388,7 @@ impl<'a> ShaderFromNir<'a> {
             b.push_op(phi);
         }
 
-        if self.sm.sm() < 75 && nb.cf_node.prev().is_none() {
+        if self.sm.sm() < 70 && nb.cf_node.prev().is_none() {
             if let Some(_) = nb.parent().as_loop() {
                 b.push_op(OpPCnt {
                     target: self.get_block_label(nb),
